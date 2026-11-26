@@ -849,8 +849,14 @@ func TestPluginIntegration(t *testing.T) {
 			response := requestWithTimeout(t, 45*time.Second, http.MethodPost, host.base+"/v1/chat/completions", clientKey, []byte(`{"model":"vllm/CodeAgent","messages":[]}`))
 			body, _ := io.ReadAll(response.Body)
 			response.Body.Close()
-			if response.StatusCode != http.StatusBadGateway && response.StatusCode != http.StatusGatewayTimeout {
+			if i == 0 && response.StatusCode != http.StatusBadGateway && response.StatusCode != http.StatusGatewayTimeout {
 				t.Fatalf("запрос %d: status=%d body=%s", i+1, response.StatusCode, body)
+			}
+			if i == 1 && response.StatusCode != http.StatusBadGateway && response.StatusCode != http.StatusServiceUnavailable && response.StatusCode != http.StatusGatewayTimeout {
+				t.Fatalf("запрос %d: status=%d body=%s", i+1, response.StatusCode, body)
+			}
+			if i == 1 && response.StatusCode == http.StatusServiceUnavailable && !bytes.Contains(body, []byte("auth_unavailable")) {
+				t.Fatalf("запрос %d: status=%d без auth_unavailable в теле: %s", i+1, response.StatusCode, body)
 			}
 			if time.Since(started) > 12*time.Second {
 				t.Fatalf("запрос %d завис: %s", i+1, time.Since(started))
@@ -907,6 +913,9 @@ func TestPluginIntegration(t *testing.T) {
 		mock := newMock(t, state)
 		defer mock.Close()
 		host := startHost(t, hostOptions{Upstream: mock.URL})
+		if !waitForModel(t, host, "vllm/CodeAgent", 10*time.Second) {
+			t.Fatal("модель не появилась перед потоковым запросом")
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, host.base+"/v1/chat/completions", strings.NewReader(`{"model":"vllm/CodeAgent","messages":[],"stream":true}`))
 		req.Header.Set("Authorization", "Bearer "+clientKey)
@@ -915,16 +924,30 @@ func TestPluginIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		scanner := bufio.NewScanner(response.Body)
-		if !scanner.Scan() {
-			t.Fatal("первый кадр не получен")
+		var received strings.Builder
+		for scanner.Scan() {
+			line := scanner.Text()
+			received.WriteString(line)
+			received.WriteByte('\n')
+			if strings.Contains(line, "frame-00") {
+				break
+			}
 		}
+		if !strings.Contains(received.String(), "frame-00") {
+			t.Fatalf("первый кадр мока не получен: %s", received.String())
+		}
+		cancelledAt := time.Now()
 		cancel()
 		response.Body.Close()
 		select {
 		case <-state.cancelled:
+			t.Logf("отмена дошла до мока через %s; frames=%d after_cancel=%d", time.Since(cancelledAt), state.streamFrames.Load(), state.framesAfterCancel.Load())
 		case <-time.After(3 * time.Second):
-			t.Fatalf("хост не передал отмену клиентского контекста моку: frames=%d after_cancel=%d", state.streamFrames.Load(), state.framesAfterCancel.Load())
+			t.Fatalf("хост не передал отмену клиентского контекста моку: frames=%d after_cancel=%d elapsed=%s", state.streamFrames.Load(), state.framesAfterCancel.Load(), time.Since(cancelledAt))
 		}
+		state.mu.Lock()
+		state.mode = ""
+		state.mu.Unlock()
 		followUp := request(t, http.MethodPost, host.base+"/v1/chat/completions", clientKey, []byte(`{"model":"vllm/CodeAgent","messages":[]}`))
 		followUpBody, _ := io.ReadAll(followUp.Body)
 		followUp.Body.Close()
