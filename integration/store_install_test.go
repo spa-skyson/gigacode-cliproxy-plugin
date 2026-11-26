@@ -58,6 +58,7 @@ func TestStoreInstall(t *testing.T) {
 	mock := newMock(t, state)
 	defer mock.Close()
 	host := startStoreHost(t, mock.URL, registryURL)
+	t.Cleanup(host.stop)
 	installedPath := filepath.Join(host.pluginDir, "linux", "amd64", "gigacode-v"+storeVersion+".so")
 	installed := false
 	t.Run("реестр", func(t *testing.T) {
@@ -115,12 +116,13 @@ func TestStoreInstall(t *testing.T) {
 		checkInstalledPlugin(t, host, storeVersion)
 		checkStorePluginTraffic(t, host, state)
 	})
-	t.Run("перезапуск", func(t *testing.T) {
+	t.Run("перезапуск", func(restartT *testing.T) {
 		if !installed {
 			prepareStoreRestart(t, host, wantBytes)
 		}
 		host.stop()
-		host = startStoreHostWithRoot(t, host.root, host.config, host.pluginDir, host.upstream, host.registry)
+		host = startStoreHostWithRoot(restartT, host.root, host.config, host.pluginDir, host.upstream, host.registry)
+		t.Cleanup(host.stop)
 		checkRegisteredPlugin(t, host, storeVersion)
 		checkStorePluginTraffic(t, host, state)
 	})
@@ -293,7 +295,6 @@ plugins:
 	}
 	host := &storeHost{hostProcess: &hostProcess{base: fmt.Sprintf("http://127.0.0.1:%d", port), stderr: stderrPath, cmd: cmd}, root: root, config: configPath, pluginDir: pluginDir, upstream: upstream, registry: registryURL}
 	host.stopFunc = func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait(); _ = stderr.Close() }
-	t.Cleanup(host.stop)
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		response, requestErr := http.Get(host.base + "/healthz")
@@ -352,6 +353,14 @@ func checkStorePluginTraffic(t *testing.T, host *storeHost, state *mockState) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("mock response")) {
 		t.Fatalf("non-stream chat: status=%d body=%s", response.StatusCode, body)
+	}
+	select {
+	case <-state.firstFrame:
+	default:
+	}
+	select {
+	case <-state.lastFrame:
+	default:
 	}
 	state.mu.Lock()
 	state.mode = "stream"
