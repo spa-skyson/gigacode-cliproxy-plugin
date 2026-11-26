@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Сборка поставки
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: golang:1.26-bookworm@sha256:79ecd0a7157c7a4cf3b281ced8465350591bf54fedab540e75374a003e1fde7e
+    steps:
+      - name: Checkout репозитория
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Кэш модулей и сборки Go
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            /go/pkg/mod
+            /root/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-
+
+      - name: Версия из имени тега
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9][0-9A-Za-z.+-]*$'; then
+            echo "Версия \"$version\" из тега \"$GITHUB_REF_NAME\" не проходит проверку ^[0-9][0-9A-Za-z.+-]*\$"
+            exit 1
+          fi
+          echo "Версия релиза: $version"
+
+      - name: Форматирование gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "gofmt -l нашёл неформатированные файлы:"
+            echo "$out"
+            exit 1
+          fi
+          echo "gofmt: чисто"
+
+      - name: Проверка go vet
+        run: |
+          go vet ./...
+          go vet -tags=integration ./...
+
+      - name: Юнит-тесты
+        run: go test -race ./...
+
+      - name: Сборка плагина
+        run: make build-in-container VERSION="$VERSION"
+
+      - name: Checkout хоста CLIProxyAPI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: router-for-me/CLIProxyAPI
+          ref: 85225381d89915595598ed13766cd79890c03a84  # v8.1.2
+          path: host
+
+      - name: Сборка хоста
+        run: mkdir -p host-bin && cd host && CGO_ENABLED=1 go build -o ../host-bin/CLIProxyAPI ./cmd/server
+
+      - name: Интеграционный тест
+        shell: bash
+        env:
+          CLIPROXY_BIN: ${{ github.workspace }}/host-bin/CLIProxyAPI
+          GIGACODE_PLUGIN_SO: ${{ github.workspace }}/dist/gigacode.so
+        run: |
+          go test -tags=integration -count=1 -v ./integration/ 2>&1 | tee integration-test.log
+
+      - name: Маскирование секретов в логе интеграционного теста
+        if: failure()
+        run: |
+          if [ -f integration-test.log ]; then
+            sed -E -i \
+              -e 's/jwt-token-[0-9]+/<токен>/g' \
+              -e 's/[0-9a-f]{64}/<hex64>/g' \
+              -e 's/client-key-for-integration/<ключ>/g' \
+              -e 's/management-key-for-integration/<ключ>/g' \
+              integration-test.log
+          fi
+
+      - name: Вывод интеграционного теста при сбое
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: integration-test-log
+          path: integration-test.log
+          if-no-files-found: ignore
+
+      - name: Упаковка поставки
+        run: make package VERSION="$VERSION"
+
+      - name: Приложить поставку к артефакту
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: dist
+          path: |
+            dist/*.zip
+            dist/checksums.txt
+          if-no-files-found: error
+
+  release:
+    name: Публикация релиза
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: Скачать поставку
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Проверка поставки перед публикацией
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test -s "dist/gigacode_${version}_linux_amd64.zip" || { echo "нет файла dist/gigacode_${version}_linux_amd64.zip или он пуст"; exit 1; }
+          test -s dist/checksums.txt || { echo "нет файла dist/checksums.txt или он пуст"; exit 1; }
+          (cd dist && sha256sum -c checksums.txt)
+
+      - name: Создать релиз
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "gigacode $version" \
+            --generate-notes \
+            "dist/gigacode_${version}_linux_amd64.zip" \
+            "dist/checksums.txt"

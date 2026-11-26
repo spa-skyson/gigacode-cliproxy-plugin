@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "gigacode",
+      "name": "GigaCode",
+      "description": "GigaCode provider for CLIProxyAPI: obtains a short-lived JWT from a device_code secret, refreshes it in the background, serves the model list and proxies chat in normal and SSE modes.",
+      "author": "spa-skyson",
+      "repository": "https://github.com/spa-skyson/gigacode-cliproxy-plugin",
+      "homepage": "https://github.com/spa-skyson/gigacode-cliproxy-plugin",
+      "license": "MIT",
+      "tags": ["gigacode", "provider", "oauth", "chat", "sse"],
+      "locales": {
+        "ru": {
+          "name": "GigaCode",
+          "description": "Провайдер GigaCode для CLIProxyAPI: плагин получает краткоживущий JWT по device_code, заранее обновляет его по расписанию, отдаёт список моделей и проксирует чат в обычном и потоковом (SSE) режимах. Требуется auth-файл с device_code после первого входа.",
+          "tags": ["gigacode", "провайдер", "oauth", "чат", "sse"]
+        }
+      }
+    }
+  ]
+}

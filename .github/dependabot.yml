@@ -1,0 +1,11 @@
+# Хеши действий и зависимости Go обновляются запросами на слияние.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
